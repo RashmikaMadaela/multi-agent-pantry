@@ -1,0 +1,28 @@
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Environment & secrets (NEVER commit) ────────────────────────────────────
+.env
+*.env
+
+# ── Runtime output ──────────────────────────────────────────────────────────
+output/
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.python-version
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+
+# ── detect-secrets baseline ──────────────────────────────────────────────────
+.secrets.baseline
