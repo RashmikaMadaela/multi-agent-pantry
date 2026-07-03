@@ -1,0 +1,41 @@
+# =============================================================================
+# docker-compose.yml — multi-agent-pantry
+#
+# SECURITY NOTE
+# -------------
+# API keys are loaded from .env via `env_file` at runtime.
+# They are NEVER hardcoded here or in the Dockerfile.
+# Ensure .env is in .gitignore and never committed to version control.
+#
+# USAGE
+# -----
+#   docker compose up --build       # Build image and run pipeline
+#   docker compose up               # Run with existing image
+#   docker compose down             # Stop and remove containers
+# =============================================================================
+
+services:
+  pantry:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Build target: use the lean runtime stage (not the builder)
+      target: runtime
+
+    # Inject GOOGLE_API_KEY and any other secrets from the local .env file.
+    # This is the correct pattern — secrets never appear in this file.
+    env_file:
+      - .env
+
+    # The MCP inventory server is spawned as a subprocess inside the container
+    # (via McpToolset's StdioConnectionParams) — it does NOT need its own
+    # service. All inter-process communication happens via stdio within the
+    # single container.
+
+    # Mount the output directory so the final email is accessible on the host
+    volumes:
+      - ./output:/app/output
+
+    # Restart policy: on-failure is appropriate for a CLI pipeline tool.
+    # The container exits 0 on success, non-zero on error.
+    restart: "no"
