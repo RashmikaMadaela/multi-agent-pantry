@@ -46,7 +46,8 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from mcp.server.fastmcp import FastMCP
 
-from data.inventory import INVENTORY
+# Import DB models — reads from SQLite instead of the static INVENTORY list
+from data.database import InventoryItem as DBInventoryItem, SessionLocal, init_db
 
 
 # ---------------------------------------------------------------------------
@@ -85,12 +86,9 @@ class InventoryItem(BaseModel):
 
 # ---------------------------------------------------------------------------
 # FastMCP server instance
-# The server name "pantry-inventory" is surfaced to the ADK MCPToolset
-# during the MCP capability handshake.
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
     name="pantry-inventory",
-    # Brief description shown during MCP tool discovery
     instructions=(
         "Provides real-time inventory data for La Bella Cucina restaurant. "
         "Use check_inventory to retrieve all ingredient stock levels."
@@ -104,7 +102,7 @@ mcp = FastMCP(
 @mcp.tool()
 def check_inventory() -> list[dict]:
     """
-    Retrieve current stock levels for all tracked ingredients.
+    Retrieve current stock levels for all tracked ingredients from the database.
 
     Returns a list of inventory records, each containing:
       - item_name: Name of the ingredient.
@@ -114,38 +112,49 @@ def check_inventory() -> list[dict]:
       - reorder_quantity: Target quantity to order to reach safe stock levels.
 
     All records are validated by Pydantic before being returned.
-    In production, replace INVENTORY with a live database or POS API call.
+    Data is read from the SQLite database — reflects live stock updates.
     """
+    # Ensure the DB and tables exist (idempotent)
+    init_db()
+
+    db = SessionLocal()
     validated_items: list[dict] = []
 
-    for raw_record in INVENTORY:
-        # Validate each record — raises ValidationError if data is malformed.
-        # We intentionally validate inside the loop (not in bulk) so a single
-        # bad record produces a clear error identifying which item failed.
-        item = InventoryItem(**raw_record)
-        validated_items.append(item.model_dump())
+    try:
+        raw_records = db.query(DBInventoryItem).all()
+
+        for raw_record in raw_records:
+            item = InventoryItem(
+                item_name=raw_record.item_name,
+                unit=raw_record.unit,
+                current_stock=raw_record.current_stock,
+                minimum_threshold=raw_record.minimum_threshold,
+                reorder_quantity=raw_record.reorder_quantity,
+            )
+            validated_items.append(item.model_dump())
+    finally:
+        db.close()
 
     return validated_items
 
 
 # ---------------------------------------------------------------------------
 # Resource: inventory/summary
-# Exposes a lightweight text summary for agents that prefer resource reads
-# over tool calls (e.g. for logging or quick audits).
 # ---------------------------------------------------------------------------
 @mcp.resource("inventory://summary")
 def inventory_summary() -> str:
     """
     Returns a plain-text summary of total SKUs and how many are in shortage.
-
-    This MCP resource is not used by the Auditor Agent directly but is
-    available for monitoring dashboards or future agent skills.
     """
-    total = len(INVENTORY)
-    in_shortage = sum(
-        1 for item in INVENTORY
-        if item["current_stock"] <= item["minimum_threshold"]
-    )
+    init_db()
+    db = SessionLocal()
+    try:
+        items = db.query(DBInventoryItem).all()
+        total = len(items)
+        in_shortage = sum(1 for item in items if item.is_low_stock)
+    finally:
+        db.close()
+
     return (
         f"La Bella Cucina Inventory Summary\n"
         f"Total SKUs tracked: {total}\n"
@@ -158,7 +167,4 @@ def inventory_summary() -> str:
 # Entry point — run as stdio MCP server
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # `transport="stdio"` is the standard for subprocess-based MCP connections.
-    # The ADK MCPToolset will launch this script as a child process and
-    # communicate over stdin/stdout using the JSON-RPC MCP protocol.
     mcp.run(transport="stdio")
