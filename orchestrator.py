@@ -159,7 +159,7 @@ async def _run_agent_turn(
 # ---------------------------------------------------------------------------
 # Step 1: Run the Auditor Agent
 # ---------------------------------------------------------------------------
-async def _run_auditor(session_service: InMemorySessionService, user_id: str) -> str:
+async def _run_auditor(session_service: InMemorySessionService, user_id: str, target_item_name: str | None = None) -> str:
     """
     Runs the Auditor Agent to retrieve inventory and produce a ShortageReport.
 
@@ -170,6 +170,7 @@ async def _run_auditor(session_service: InMemorySessionService, user_id: str) ->
     Args:
         session_service: Shared session service instance.
         user_id:         Consistent user ID for this pipeline run.
+        target_item_name: If provided, asks the Auditor to focus on this item.
 
     Returns:
         The ShortageReport as a plain-text string.
@@ -193,6 +194,11 @@ async def _run_auditor(session_service: InMemorySessionService, user_id: str) ->
         session_service=session_service,
     )
 
+    if target_item_name:
+        prompt = f"Please audit the current inventory and produce the shortage report. IMPORTANT: We are specifically targeting restocking '{target_item_name}'. Make sure this item is highlighted in the report if it is low."
+    else:
+        prompt = "Please audit the current inventory and produce the shortage report."
+
     # In ADK 2.3, the Runner manages the McpToolset subprocess lifecycle
     # internally — no explicit context manager is needed. The toolset is
     # passed to the LlmAgent and the Runner handles spawning/teardown.
@@ -203,7 +209,7 @@ async def _run_auditor(session_service: InMemorySessionService, user_id: str) ->
         user_id=user_id,
         # The Auditor's system prompt instructs it to call the tool and
         # return a formatted report — this trigger message is minimal.
-        user_message="Please audit the current inventory and produce the shortage report.",
+        user_message=prompt,
         output_key="shortage_report",
     )
 
@@ -377,7 +383,7 @@ def _save_output(email_draft: str, verdict: str, attempts: int) -> Path:
 # ---------------------------------------------------------------------------
 # Main orchestration entry point
 # ---------------------------------------------------------------------------
-async def orchestrate() -> str:
+async def orchestrate(target_item_name: str | None = None) -> str:
     """
     Runs the full multi-agent pipeline and returns the final email draft.
 
@@ -389,6 +395,10 @@ async def orchestrate() -> str:
          - FAIL: send critique back to step 2, increment attempt counter
       4. If max attempts exhausted: log warning, save and return best draft
 
+    Args:
+        target_item_name: Optional. If provided, the pipeline is instructed to
+                          focus specifically on restocking this item.
+
     Returns:
         The final email draft text (PASS quality or best-effort after 3 tries).
 
@@ -397,6 +407,8 @@ async def orchestrate() -> str:
                       indicating a data or MCP connection problem.
     """
     log.info("═══ multi-agent-pantry pipeline starting ═══")
+    if target_item_name:
+        log.info("Targeting specific item: %s", target_item_name)
 
     # A single session service is shared across all agent runs in this pipeline.
     # InMemorySessionService is in-process and requires no external dependencies.
@@ -407,7 +419,7 @@ async def orchestrate() -> str:
     user_id = f"system-run-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     # ── Step 1: Audit ────────────────────────────────────────────────────────
-    shortage_report = await _run_auditor(session_service, user_id)
+    shortage_report = await _run_auditor(session_service, user_id, target_item_name)
 
     if not shortage_report:
         raise RuntimeError(
