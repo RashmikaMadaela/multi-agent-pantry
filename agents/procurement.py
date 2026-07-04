@@ -35,7 +35,13 @@ from our own data module — never from external/user input — so there is no
 prompt-injection risk here.
 """
 
+import os
+
 from google.adk.agents import LlmAgent
+
+# Allow overriding the model from the environment — useful when one model's
+# free-tier quota is exhausted (e.g. swap to gemini-2.0-flash-lite).
+_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 from data.vendors import VENDOR
 
@@ -81,7 +87,7 @@ def build_procurement_agent() -> LlmAgent:
     """
     agent = LlmAgent(
         name="ProcurementAgent",
-        model="gemini-2.0-flash",
+        model=_MODEL,
         instruction=_PROCUREMENT_SYSTEM_PROMPT,
         # No tools needed — this agent only generates text
         tools=[],

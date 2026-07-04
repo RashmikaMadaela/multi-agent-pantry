@@ -22,8 +22,8 @@ HOW IT WORKS (ADK LlmAgent + McpToolset)
    `check_inventory` tool automatically.
 3. The agent calls `check_inventory`, receives the validated JSON list, then
    produces a human-readable ShortageReport as its final text response.
-4. The McpToolset is an async context manager — ADK closes the subprocess
-   connection cleanly after the agent finishes.
+4. The ADK Runner manages the McpToolset subprocess lifecycle internally —
+   no explicit context manager call is required from the orchestrator.
 
 SECURITY NOTE
 -------------
@@ -34,6 +34,10 @@ before reaching the LLM — defence-in-depth against malformed data.
 
 import os
 import sys
+
+# Allow overriding the model from the environment — useful when one model's
+# free-tier quota is exhausted (e.g. swap to gemini-2.0-flash-lite).
+_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 from google.adk.agents import LlmAgent
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, StdioConnectionParams
@@ -84,14 +88,12 @@ def build_auditor_agent() -> tuple[LlmAgent, McpToolset]:
     """
     Constructs and returns the Auditor LlmAgent together with its McpToolset.
 
-    WHY return the toolset separately?
-    ADK's McpToolset must be used as an async context manager to ensure the
-    MCP server subprocess is properly spawned and shut down.  The orchestrator
-    is responsible for entering/exiting the context manager around the run.
+    The McpToolset is passed to the LlmAgent so the ADK Runner can discover
+    and manage the MCP server subprocess automatically — no manual context
+    manager is needed by the caller in ADK 0.3+.
 
     Returns:
         A tuple of (LlmAgent, McpToolset).
-        The orchestrator must use the toolset as: `async with toolset: ...`
     """
     # Connect to the inventory MCP server via stdio subprocess.
     # StdioConnectionParams wraps StdioServerParameters (the MCP SDK type)
@@ -109,8 +111,8 @@ def build_auditor_agent() -> tuple[LlmAgent, McpToolset]:
 
     agent = LlmAgent(
         name="AuditorAgent",
-        # gemini-2.0-flash: fast, cost-efficient, strong tool-use capability
-        model="gemini-2.0-flash",
+        # Model is read from GEMINI_MODEL env var (default: gemini-2.0-flash-lite)
+        model=_MODEL,
         instruction=_AUDITOR_SYSTEM_PROMPT,
         tools=[mcp_toolset],
         # Store the shortage report text in session state so downstream agents

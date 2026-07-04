@@ -42,8 +42,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from typing import Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from mcp.server.fastmcp import FastMCP
 
@@ -71,7 +70,7 @@ class InventoryItem(BaseModel):
 
     @field_validator("reorder_quantity")
     @classmethod
-    def reorder_must_exceed_threshold(cls, v: float, info: Any) -> float:
+    def reorder_must_exceed_threshold(cls, v: float, info: ValidationInfo) -> float:
         """
         Sanity check: the reorder quantity must be greater than the minimum
         threshold, otherwise restocking would immediately trigger another order.

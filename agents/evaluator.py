@@ -44,7 +44,13 @@ from __future__ import annotations
 
 import dataclasses
 
+import os
+
 from google.adk.agents import LlmAgent
+
+# Allow overriding the model from the environment — useful when one model's
+# free-tier quota is exhausted (e.g. swap to gemini-2.0-flash-lite).
+_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +130,7 @@ def build_evaluator_agent() -> LlmAgent:
     """
     agent = LlmAgent(
         name="EvaluatorAgent",
-        model="gemini-2.0-flash",
+        model=_MODEL,
         instruction=_EVALUATOR_SYSTEM_PROMPT,
         tools=[],
         # Store the evaluation result in session state for logging

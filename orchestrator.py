@@ -46,9 +46,7 @@ SECURITY
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -421,6 +419,7 @@ async def orchestrate() -> str:
     email_draft = ""
     last_result: EvaluationResult | None = None
     critique: str | None = None
+    attempt: int = 0  # Guards against unbound variable if MAX_PROCUREMENT_ATTEMPTS == 0
 
     for attempt in range(1, MAX_PROCUREMENT_ATTEMPTS + 1):
         # Draft (or re-draft with critique)
@@ -463,8 +462,7 @@ async def orchestrate() -> str:
 
     # ── Save output ──────────────────────────────────────────────────────────
     final_verdict = last_result.verdict if last_result else "UNKNOWN"
-    final_attempts = min(attempt, MAX_PROCUREMENT_ATTEMPTS)
-    output_path = _save_output(email_draft, final_verdict, final_attempts)
+    output_path = _save_output(email_draft, final_verdict, attempt)
 
     log.info("═══ Pipeline complete — output saved to %s ═══", output_path)
     return email_draft
