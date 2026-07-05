@@ -9,7 +9,7 @@
 [![MCP](https://img.shields.io/badge/MCP-Model_Context_Protocol-orange)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-> Three specialized AI agents that autonomously audit restaurant inventory, draft supplier restock emails, and self-critique until the output meets a strict quality standard — all without a single line of manual procurement work.
+> Three specialized AI agents that autonomously audit restaurant inventory, draft supplier restock emails grouped by supplier, and self-critique until the output meets a strict quality standard — all without a single line of manual procurement work.
 
 
 ---
@@ -37,6 +37,7 @@ This manual process introduces compounding failure modes:
 - **Human error** — missed items, wrong quantities, or incorrect units on restock orders lead to mid-service stockouts or over-ordering perishables that go to waste.
 - **Time cost** — a 40-minute daily task across 300 service days is **200+ hours per year** of skilled labour spent on data entry.
 - **Inconsistent quality** — restock emails written at the end of a stressful shift often lack specifics (no exact quantities, no delivery urgency), causing back-and-forth with suppliers that delays fulfilment.
+- **Duplicate requests** — without tracking which items have already been ordered, managers risk re-sending requests for items already en route from a supplier.
 
 **The core insight:** inventory auditing and procurement drafting are structured, repeatable tasks where an AI agent pipeline can match human accuracy at a fraction of the time.
 
@@ -47,8 +48,10 @@ This manual process introduces compounding failure modes:
 `multi-agent-pantry` is a **fully autonomous three-agent AI pipeline** built on Google's Agent Development Kit (ADK). Given a restaurant's inventory data, it:
 
 1. **Audits** all stock levels against minimum thresholds using a live MCP tool call — no spreadsheets, no manual counting.
-2. **Drafts** a professional, complete restock email to the supplier with exact quantities, delivery urgency, and account references.
-3. **Self-critiques** the draft against three strict quality criteria and automatically **retries** with targeted feedback until the email passes — or after 3 attempts outputs the best available version with a warning.
+2. **Groups** all low-stock items from the same supplier into a **single combined email** — one email per supplier, not one per item.
+3. **Tracks "requested" state** — items covered by a sent email are excluded from future drafts until stock drops again, preventing duplicate orders.
+4. **Drafts** a professional, complete restock email to each supplier with exact quantities for every item in that supplier's group.
+5. **Self-critiques** the draft against three strict quality criteria and automatically **retries** with targeted feedback until the email passes — or after 3 attempts outputs the best available version with a warning.
 
 **Business value delivered:**
 | Metric | Manual Process | multi-agent-pantry |
@@ -56,6 +59,7 @@ This manual process introduces compounding failure modes:
 | Time per procurement cycle | ~40 min/day | ~2 min/day |
 | Stockout risk | High (human error) | Eliminated for tracked SKUs |
 | Email quality | Inconsistent | Enforced by Evaluator agent |
+| Duplicate order risk | High | Eliminated via "requested" state |
 | Audit trail | None | Full log + saved output |
 
 One command. Zero manual input. Production-quality output.
@@ -66,8 +70,17 @@ One command. Zero manual input. Production-quality output.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         main.py (entry point)                       │
-│              loads .env · validates API key · runs pipeline         │
+│                     FastAPI Backend (api/main.py)                   │
+│       REST API · auto-trigger on low stock · SQLite persistence     │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │  Low-stock event → group by supplier
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│               Supplier Grouping & "Requested" State Logic           │
+│  • Collect ALL low-stock items for this supplier                    │
+│  • Exclude items already covered by a sent draft (in-flight)        │
+│  • Re-include items that went low AGAIN after the order was sent    │
+│  • Replace stale pending_review draft with fresh combined draft     │
 └──────────────────────────────┬──────────────────────────────────────┘
                                │
                                ▼
@@ -81,31 +94,51 @@ One command. Zero manual input. Production-quality output.
            │ (LlmAgent)   │     │                                    │
            │              │     │  ┌──────────────────────────────┐  │
            │  McpToolset  │     │  │  ProcurementAgent (LlmAgent) │  │
-           └──────┬───────┘     │  └───────────────┬──────────────┘  │
-                  │ stdio MCP   │                   │ EmailDraft      │
-           ┌──────▼───────┐     │  ┌───────────────▼──────────────┐  │
-           │  MCP Server  │     │  │  EvaluatorAgent  (LlmAgent)  │  │
-           │  (FastMCP)   │     │  │  PASS → save & print         │  │
-           │  + Pydantic  │     │  │  FAIL → critique → retry     │  │
-           └──────┬───────┘     │  └──────────────────────────────┘  │
-                  │             └────────────────────────────────────┘
-           ┌──────▼───────┐
-           │ INVENTORY    │
-           │ (mock data / │
-           │  future POS) │
+           └──────┬───────┘     │  │  (vendor details from DB)    │  │
+                  │ stdio MCP   │  └───────────────┬──────────────┘  │
+           ┌──────▼───────┐     │                   │ EmailDraft      │
+           │  MCP Server  │     │  ┌───────────────▼──────────────┐  │
+           │  (FastMCP)   │     │  │  EvaluatorAgent  (LlmAgent)  │  │
+           │  + Pydantic  │     │  │  PASS → save & print         │  │
+           └──────┬───────┘     │  │  FAIL → critique → retry     │  │
+                  │             │  └──────────────────────────────┘  │
+           ┌──────▼───────┐     └────────────────────────────────────┘
+           │   SQLite DB  │
+           │  inventory   │
+           │  email_drafts│
+           │  draft_items │
            └──────────────┘
 ```
 
 ### Agent Breakdown
 
 #### 🔍 Auditor Agent
-Calls the `check_inventory` MCP tool, receives the Pydantic-validated inventory JSON, and identifies all items where `current_stock ≤ minimum_threshold`. Computes `quantity_to_order = reorder_quantity − current_stock` for each deficit item and produces a structured **ShortageReport**.
+Calls the `check_inventory` MCP tool, receives the Pydantic-validated inventory JSON, and identifies all items where `current_stock ≤ minimum_threshold`. Computes `quantity_to_order = reorder_quantity − current_stock` for each deficit item and produces a structured **ShortageReport**. When triggered from the API, the report is scoped to a specific set of items for the target supplier.
 
 #### 📧 Procurement Agent
-Receives the ShortageReport and vendor contact details, then drafts a professional restock request email. On retry attempts, it receives the Evaluator's specific critique prepended to its context and rewrites the email addressing every raised issue.
+Receives the ShortageReport and supplier contact details (from the DB, not a static file), then drafts a professional restock request email covering **all items in that supplier group**. On retry attempts, it receives the Evaluator's specific critique prepended to its context and rewrites the email addressing every raised issue.
 
 #### ✅ Evaluator Agent
 Scores the email draft against three hard criteria: **(1)** every shortage item is mentioned, **(2)** each item has an exact numeric quantity + unit, **(3)** a concrete delivery date or urgency statement is present. Returns `VERDICT: PASS` or `VERDICT: FAIL` with a targeted critique identifying every gap.
+
+### Database Design
+
+```
+inventory_items          email_drafts              email_draft_items
+──────────────           ────────────────          ─────────────────
+id (PK)                  id (PK)                   id (PK)
+item_name                supplier_email  ◄──────── draft_id  (FK)
+unit                     supplier_name             item_id   (FK) ──► inventory_items.id
+current_stock            draft_text
+minimum_threshold        subject
+reorder_quantity         status
+supplier_name            created_at
+supplier_email           updated_at
+created_at
+updated_at
+```
+
+**Key design: one `EmailDraft` per supplier**, not per item. The `email_draft_items` join table records which items are "requested" (in-flight), enabling precise exclusion logic on the next procurement cycle.
 
 ---
 
@@ -164,7 +197,7 @@ The project started with a simple idea: replace the daily procurement email rout
 
 **The retry loop was the hardest part to get right.** The first instinct was to use ADK's `SequentialAgent` + `LoopAgent`, but the conditional retry (PASS exits, FAIL loops) required state that doesn't flow naturally through those primitives. Switching to an explicit `async for attempt in range(1, MAX_ATTEMPTS + 1)` loop with Python's `for...else` clause made the logic self-documenting and testable.
 
-**The Evaluator Agent prompt needed three iterations.** Early versions produced free-form critique that was hard to parse reliably. Enforcing the `VERDICT: PASS/FAIL` prefix format — and having `parse_evaluation_result()` default to `FAIL` on any malformed response — made the system robust without fragile regex.
+**Supplier grouping required a rethink of the data model.** The original design created one `EmailDraft` per inventory item, leading to duplicated emails for suppliers with multiple low-stock products. Restructuring the draft to be *supplier-scoped* — with a join table tracking which items each draft covers — made the "requested" state logic clean and composable: exclude items already in a sent draft, unless they went low again after the send timestamp.
 
 The biggest lesson: **multi-agent architecture is as much about data contracts and failure modes as it is about prompts.**
 
@@ -178,7 +211,9 @@ The biggest lesson: **multi-agent architecture is as much about data contracts a
 - A Google AI Studio API key ([get one free](https://aistudio.google.com/app/apikey))
 - Docker (optional, for containerised run)
 
-### Option A — Local Run
+### Option A — Web App (Recommended)
+
+The full experience includes a web UI with live inventory management and email draft review.
 
 ```bash
 # 1. Clone the repository
@@ -189,26 +224,43 @@ cd multi-agent-pantry
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-# 3. Install dependencies
+# 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Configure your API key
+# 4. Configure your API key (and optional Gmail credentials for actual sending)
 cp .env.example .env
-# Open .env and set: GOOGLE_API_KEY=your_key_here
+# Open .env and set:
+#   GOOGLE_API_KEY=your_key_here
+#   GMAIL_SENDER=you@gmail.com          (optional)
+#   GMAIL_APP_PASSWORD=xxxx xxxx xxxx   (optional)
 
-# 5. Run the pipeline
+# 5. Start the FastAPI backend
+uvicorn api.main:app --reload
+
+# 6. In a second terminal, start the frontend
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` — the dashboard shows live inventory, triggers the pipeline on low-stock updates, and lets you review/edit/send the grouped supplier emails.
+
+### Option B — CLI Pipeline
+
+```bash
+# Run the full agent pipeline directly (no web UI)
 python main.py
 ```
 
-### Option B — Makefile Shortcuts
+### Option C — Makefile Shortcuts
 
 ```bash
-make run          # Run the pipeline locally (uses .venv)
+make run          # Run the CLI pipeline locally (uses .venv)
 make test         # Run the test suite
 make clean        # Remove output/ and __pycache__
 ```
 
-### Option C — Docker
+### Option D — Docker
 
 ```bash
 # 1. Configure your API key in .env (same as above)
@@ -226,6 +278,7 @@ The pipeline logs each step and prints the final email:
 
 ```
 11:30:01 [INFO] orchestrator — ═══ multi-agent-pantry pipeline starting ═══
+11:30:01 [INFO] orchestrator — Targeting items: ['Roma Tomatoes', 'Garlic']
 11:30:01 [INFO] orchestrator — ━━━ STEP 1: Running AuditorAgent ━━━
 11:30:05 [INFO] orchestrator — ShortageReport received (487 chars)
 11:30:05 [INFO] orchestrator — ━━━ STEP 2: Running ProcurementAgent (attempt 1/3) ━━━
@@ -235,54 +288,46 @@ The pipeline logs each step and prints the final email:
 11:30:11 [INFO] orchestrator — ✅ Email PASSED evaluation on attempt 1
 ```
 
-The final email is saved to `output/final_email.txt`.
+The final email is saved to `output/final_email_<supplier>.txt`.
 
 ---
 
 ## 📄 Sample Output
 
-### ShortageReport (from AuditorAgent)
+### ShortageReport (from AuditorAgent — Green Valley Produce group)
 
 ```
 SHORTAGE REPORT — La Bella Cucina
 ==================================
 The following items require immediate restocking:
 
-1. Chicken Breast    | Unit: kg     | Current: 4.0  | Need to Order: 21.0
-2. Olive Oil         | Unit: liters | Current: 1.5  | Need to Order: 13.5
-3. Roma Tomatoes     | Unit: kg     | Current: 8.0  | Need to Order: 22.0
-4. Heavy Cream       | Unit: liters | Current: 2.0  | Need to Order: 10.0
-5. Parmesan Cheese   | Unit: kg     | Current: 0.5  | Need to Order: 7.5
-6. Garlic            | Unit: kg     | Current: 1.0  | Need to Order: 4.0
+1. Roma Tomatoes  | Unit: kg | Current: 8.0  | Need to Order: 22.0
+2. Garlic         | Unit: kg | Current: 1.0  | Need to Order: 4.0
 
-SUMMARY: 6 item(s) require restocking.
+SUMMARY: 2 item(s) require restocking.
 ```
 
-### Final Email (from ProcurementAgent, PASS on attempt 1)
+### Final Email (combined for Green Valley Produce — PASS on attempt 1)
 
 ```
-Subject: Urgent Restock Request – Account FF-78432
+Subject: Restock Request: Roma Tomatoes, Garlic
 
-Dear Marcus,
+Dear Green Valley Produce,
 
 I hope this message finds you well. I'm writing on behalf of La Bella Cucina
 to place an urgent restock order for several ingredients that have fallen
 below our minimum stock thresholds.
 
-Please arrange delivery of the following items to our kitchen by July 5, 2026:
+Please arrange delivery of the following items to our kitchen by July 8, 2026:
 
-  1. Chicken Breast     — 21.0 kg
-  2. Olive Oil          — 13.5 liters
-  3. Roma Tomatoes      — 22.0 kg
-  4. Heavy Cream        — 10.0 liters
-  5. Parmesan Cheese    —  7.5 kg
-  6. Garlic             —  4.0 kg
+  1. Roma Tomatoes  — 22.0 kg
+  2. Garlic         —  4.0 kg
 
 Given our current stock levels, this delivery is time-sensitive and required
 by the date above to avoid service disruption. Please confirm receipt of this
 order and provide an estimated delivery window at your earliest convenience.
 
-This order falls under our standard Net-30 payment terms (Account: FF-78432).
+This order falls under our standard Net-30 payment terms.
 
 Thank you for your continued partnership.
 
@@ -290,6 +335,8 @@ Warm regards,
 Chef Sofia Marchetti
 La Bella Cucina
 ```
+
+> **Note:** If Roma Tomatoes and Garlic were already covered by a sent email, they will be excluded from the next draft for Green Valley Produce until their stock drops again after the order was sent.
 
 ---
 
@@ -308,22 +355,39 @@ multi-agent-pantry/
 ├── .gitignore
 │
 ├── data/
-│   ├── inventory.py             ← Mock inventory data (8 SKUs)
-│   └── vendors.py               ← Supplier contact details
+│   ├── database.py              ← SQLAlchemy models: InventoryItem, EmailDraft,
+│   │                               EmailDraftItem (supplier-grouped drafts)
+│   ├── inventory.py             ← Legacy mock inventory helpers
+│   └── vendors.py               ← Fallback supplier contact details (CLI mode)
 │
 ├── mcp_server/
 │   └── inventory_server.py      ← FastMCP server + Pydantic validation
 │
 ├── agents/
 │   ├── auditor.py               ← AuditorAgent (LlmAgent + McpToolset)
-│   ├── procurement.py           ← ProcurementAgent + message builders
+│   ├── procurement.py           ← ProcurementAgent + dynamic vendor message builder
 │   └── evaluator.py             ← EvaluatorAgent + result parser
 │
-├── orchestrator.py              ← Async pipeline + retry loop
-├── main.py                      ← Entry point
+├── api/
+│   ├── main.py                  ← FastAPI backend
+│   │                               • Supplier grouping & "requested" state logic
+│   │                               • Auto-trigger pipeline on low stock
+│   │                               • Draft CRUD endpoints
+│   └── email_sender.py          ← Gmail SMTP sender
+│
+├── frontend/
+│   └── src/
+│       ├── components/
+│       │   ├── DraftPanel.jsx   ← Draft review UI (grouped items per supplier)
+│       │   ├── InventoryTable.jsx
+│       │   └── AddItemModal.jsx
+│       └── api/client.js        ← Fetch wrappers for all API endpoints
+│
+├── orchestrator.py              ← Async pipeline + retry loop (multi-item aware)
+├── main.py                      ← CLI entry point
 │
 └── output/                      ← Git-ignored; stores run artefacts
-    └── final_email.txt
+    └── final_email_<supplier>.txt
 ```
 
 ---
@@ -333,10 +397,10 @@ multi-agent-pantry/
 | Limitation | Future Enhancement |
 |---|---|
 | Mock inventory data | Connect to real POS APIs (Toast, Square, Lightspeed) via MCP server swap |
-| Single supplier | Multi-vendor routing — match items to optimal supplier by price/availability |
-| CLI only | Slack / email integration to deliver the final email automatically |
+| Supplier contact info | Store full contact details per supplier in DB (contact name, account number) |
+| CLI only (non-web mode) | Slack / email integration to deliver the final email automatically |
 | No scheduling | Cron-triggered runs or webhook integration with inventory management systems |
-| In-memory sessions | Persistent session storage for audit history and compliance logging |
+| In-memory ADK sessions | Persistent session storage for audit history and compliance logging |
 | Free-tier rate limits | Implement exponential backoff and model fallback (Flash → Pro) |
 
 ---
