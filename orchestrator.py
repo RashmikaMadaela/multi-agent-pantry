@@ -157,6 +157,59 @@ async def _run_agent_turn(
 
 
 # ---------------------------------------------------------------------------
+# Helper: build a shortage report directly from the DB (no LLM needed)
+# ---------------------------------------------------------------------------
+def _build_shortage_report_from_db(item_names: list[str]) -> str:
+    """
+    Constructs the ShortageReport string deterministically from the SQLite DB
+    for a specific list of item names.
+
+    This is used instead of the AuditorAgent when the API already knows which
+    items need ordering (the supplier-grouped pipeline path).  Using the DB
+    directly guarantees the report contains ONLY the target items — preventing
+    the Auditor LLM from including other low-stock items from different suppliers.
+
+    Args:
+        item_names: Exact item names to include in the report.
+
+    Returns:
+        A formatted ShortageReport string ready to pass to the ProcurementAgent.
+    """
+    from data.database import InventoryItem, SessionLocal, init_db
+
+    init_db()
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(InventoryItem)
+            .filter(InventoryItem.item_name.in_(item_names))
+            .all()
+        )
+        # Preserve the caller's ordering
+        row_map = {r.item_name: r for r in rows}
+        ordered = [row_map[n] for n in item_names if n in row_map]
+
+        lines = [
+            "SHORTAGE REPORT — La Bella Cucina",
+            "==================================",
+            "The following items require immediate restocking:",
+            "",
+        ]
+        for idx, item in enumerate(ordered, start=1):
+            qty_to_order = item.reorder_quantity - item.current_stock
+            lines.append(
+                f"{idx}. {item.item_name} | Unit: {item.unit} "
+                f"| Current: {item.current_stock} "
+                f"| Need to Order: {qty_to_order:.1f}"
+            )
+        lines.append("")
+        lines.append(f"SUMMARY: {len(ordered)} item(s) require restocking.")
+        return "\n".join(lines)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Step 1: Run the Auditor Agent
 # ---------------------------------------------------------------------------
 async def _run_auditor(session_service: InMemorySessionService, user_id: str, target_item_names: list[str] | None = None) -> str:
@@ -195,30 +248,29 @@ async def _run_auditor(session_service: InMemorySessionService, user_id: str, ta
     )
 
     if target_item_names:
-        items_str = ", ".join(f"'{n}'" for n in target_item_names)
-        prompt = (
-            f"Please audit the current inventory and produce the shortage report. "
-            f"IMPORTANT: We are specifically targeting restocking the following items: {items_str}. "
-            f"Make sure ALL of these items are highlighted in the report if they are low."
+        # ── Deterministic path (API-triggered, supplier-grouped) ─────────────
+        # Build the shortage report directly from the DB so it contains ONLY
+        # the exact items in `target_item_names`.  Relying on the LLM here
+        # caused it to include all low-stock items across all suppliers in the
+        # output, polluting emails for the wrong supplier.
+        shortage_report = _build_shortage_report_from_db(target_item_names)
+        log.info(
+            "ShortageReport built from DB for %d item(s): %s",
+            len(target_item_names), target_item_names,
         )
     else:
-        prompt = "Please audit the current inventory and produce the shortage report."
+        # ── LLM Auditor path (CLI full-scan mode) ────────────────────────────
+        # Let the Auditor agent call check_inventory and produce the full report.
+        shortage_report = await _run_agent_turn(
+            runner=runner,
+            session_service=session_service,
+            session_id=session_id,
+            user_id=user_id,
+            user_message="Please audit the current inventory and produce the shortage report.",
+            output_key="shortage_report",
+        )
+        log.info("ShortageReport received (%d chars)", len(shortage_report))
 
-    # In ADK 2.3, the Runner manages the McpToolset subprocess lifecycle
-    # internally — no explicit context manager is needed. The toolset is
-    # passed to the LlmAgent and the Runner handles spawning/teardown.
-    shortage_report = await _run_agent_turn(
-        runner=runner,
-        session_service=session_service,
-        session_id=session_id,
-        user_id=user_id,
-        # The Auditor's system prompt instructs it to call the tool and
-        # return a formatted report — this trigger message is minimal.
-        user_message=prompt,
-        output_key="shortage_report",
-    )
-
-    log.info("ShortageReport received (%d chars)", len(shortage_report))
     log.debug("ShortageReport:\n%s", shortage_report)
     return shortage_report
 
