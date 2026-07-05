@@ -1,6 +1,6 @@
 // src/components/DraftPanel.jsx
 // Slide-up panel showing pending email drafts.
-// Each draft is editable and can be sent with one click.
+// Each draft is supplier-scoped and may cover multiple low-stock items.
 
 import { useState } from 'react';
 import { updateDraft, sendDraft, dismissDraft } from '../api/client';
@@ -30,11 +30,15 @@ export default function DraftPanel({ drafts, onClose, onDraftsChange, addToast }
     try {
       // Save latest edits first
       await updateDraft(draft.id, { draft_text: draft.draft_text, subject: draft.subject });
-      await sendDraft(draft.id);
+      const result = await sendDraft(draft.id);
       const remaining = localDrafts.filter((d) => d.id !== draft.id);
       setLocalDrafts(remaining);
       onDraftsChange(remaining);
-      addToast(`📧 Email sent to ${draft.supplier_email}!`, 'success');
+      const itemCount = draft.items?.length ?? 1;
+      addToast(
+        `📧 Email sent to ${draft.supplier_email}! (${itemCount} item${itemCount !== 1 ? 's' : ''} requested)`,
+        'success'
+      );
       if (remaining.length === 0) onClose();
     } catch (err) {
       addToast(err.message, 'error');
@@ -91,15 +95,36 @@ export default function DraftPanel({ drafts, onClose, onDraftsChange, addToast }
 }
 
 function DraftCard({ draft, onChange, onSave, onSend, onDismiss, isSending, isSaving }) {
+  const items = draft.items ?? [];
+
   return (
     <div className="draft-item">
       <div className="draft-item-meta">
-        <div className="draft-item-title">⚠️ {draft.item_name} — Low Stock</div>
-        <div className="draft-item-supplier">
+        {/* Supplier heading */}
+        <div className="draft-item-supplier" style={{ marginBottom: '8px' }}>
           <span>📬</span>
           <strong>{draft.supplier_name}</strong>
           <span style={{ color: 'var(--text-muted)' }}>({draft.supplier_email})</span>
         </div>
+
+        {/* Items covered by this draft */}
+        {items.length > 0 && (
+          <div className="draft-items-list">
+            <div className="draft-items-label">
+              ⚠️ {items.length} low-stock item{items.length !== 1 ? 's' : ''} in this order:
+            </div>
+            <ul className="draft-items-ul">
+              {items.map((item) => (
+                <li key={item.item_id} className="draft-items-li">
+                  <span className="draft-item-name">{item.item_name}</span>
+                  <span className="draft-item-qty">
+                    {item.current_stock} / {item.reorder_quantity} {item.unit}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       <div className="field">

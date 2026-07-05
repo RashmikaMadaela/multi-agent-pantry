@@ -403,9 +403,50 @@ body {
   gap: 12px;
 }
 
-.draft-item-meta { display: flex; flex-direction: column; gap: 4px; }
-.draft-item-title { font-size: 0.95rem; font-weight: 700; color: var(--text-primary); }
-.draft-item-supplier { font-size: 0.8rem; color: var(--text-secondary); display: flex; align-items: center; gap: 5px; }
+.draft-item-meta { display: flex; flex-direction: column; gap: 8px; }
+.draft-item-supplier { font-size: 0.85rem; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
+
+/* Grouped items list inside a draft card */
+.draft-items-list {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.draft-items-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--warning, #f59e0b);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.draft-items-ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.draft-items-li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-size: 0.82rem;
+}
+.draft-items-li:last-child { border-bottom: none; }
+.draft-item-name { color: var(--text-primary); font-weight: 500; }
+.draft-item-qty {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  background: rgba(255,255,255,0.06);
+  padding: 2px 8px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
 
 .draft-subject-input {
   width: 100%;

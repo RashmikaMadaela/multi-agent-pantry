@@ -28,6 +28,12 @@ We intentionally do NOT implement retries inside this agent — that is the
 Evaluator's job.  This separation keeps each agent's prompt focused and
 makes the retry count easy to control from the orchestrator.
 
+DYNAMIC VENDOR DETAILS
+-----------------------
+Vendor details are now passed per-invocation (from the DB record for the
+specific supplier) rather than being read from the static VENDOR dict.
+This allows the pipeline to handle multiple suppliers correctly.
+
 SECURITY NOTE
 -------------
 Vendor details (name, account number, email) are passed as structured text
@@ -42,8 +48,6 @@ from google.adk.agents import LlmAgent
 # Allow overriding the model from the environment — useful when one model's
 # free-tier quota is exhausted (e.g. swap to gemini-2.0-flash-lite).
 _MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
-
-from data.vendors import VENDOR
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +106,7 @@ def build_procurement_agent() -> LlmAgent:
 # ---------------------------------------------------------------------------
 def build_procurement_message(
     shortage_report: str,
+    vendor_details: dict,
     critique: str | None = None,
 ) -> str:
     """
@@ -112,7 +117,10 @@ def build_procurement_message(
 
     Args:
         shortage_report: Plain-text output from the Auditor Agent.
-        critique: Optional feedback from the Evaluator Agent on a failed draft.
+        vendor_details:  Dict with keys: vendor_name, contact_name, email,
+                         account_number, restaurant_name, restaurant_contact,
+                         required_delivery_date, payment_terms.
+        critique:        Optional feedback from the Evaluator Agent on a failed draft.
 
     Returns:
         A formatted string that becomes the user message for this invocation.
@@ -120,14 +128,14 @@ def build_procurement_message(
     # Vendor context injected here (not in the system prompt) so it reads
     # naturally as "data provided to you for this specific task".
     vendor_context = (
-        f"Supplier Name: {VENDOR['vendor_name']}\n"
-        f"Supplier Contact: {VENDOR['contact_name']}\n"
-        f"Supplier Email: {VENDOR['email']}\n"
-        f"Our Account Number: {VENDOR['account_number']}\n"
-        f"Restaurant: {VENDOR['restaurant_name']}\n"
-        f"Sender Name: {VENDOR['restaurant_contact']}\n"
-        f"Required Delivery Date: {VENDOR['required_delivery_date']}\n"
-        f"Payment Terms: {VENDOR['payment_terms']}\n"
+        f"Supplier Name: {vendor_details.get('vendor_name', 'N/A')}\n"
+        f"Supplier Contact: {vendor_details.get('contact_name', 'N/A')}\n"
+        f"Supplier Email: {vendor_details.get('email', 'N/A')}\n"
+        f"Our Account Number: {vendor_details.get('account_number', 'N/A')}\n"
+        f"Restaurant: {vendor_details.get('restaurant_name', 'La Bella Cucina')}\n"
+        f"Sender Name: {vendor_details.get('restaurant_contact', 'Procurement Team')}\n"
+        f"Required Delivery Date: {vendor_details.get('required_delivery_date', 'As soon as possible')}\n"
+        f"Payment Terms: {vendor_details.get('payment_terms', 'Net-30')}\n"
     )
 
     parts = [

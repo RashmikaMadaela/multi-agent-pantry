@@ -8,8 +8,12 @@ database. The MCP server, API, and orchestrator all share this single source
 of truth.
 
 Tables:
-    inventory_items  — Ingredient stock levels + supplier contact details
-    email_drafts     — AI-generated restock emails awaiting review / send
+    inventory_items    — Ingredient stock levels + supplier contact details
+    email_drafts       — AI-generated restock emails awaiting review / send.
+                         Now SUPPLIER-SCOPED: one draft covers all low-stock
+                         items from the same supplier.
+    email_draft_items  — Join table: which items are covered by each draft.
+                         Used to track the "requested" state per item.
 """
 
 from __future__ import annotations
@@ -75,9 +79,9 @@ class InventoryItem(Base):
     created_at: datetime = Column(DateTime, default=datetime.utcnow)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # One item can have many draft emails over time
-    drafts: list["EmailDraft"] = relationship(
-        "EmailDraft", back_populates="item", cascade="all, delete-orphan"
+    # An item can appear in many draft coverage records over time
+    draft_coverages: list["EmailDraftItem"] = relationship(
+        "EmailDraftItem", back_populates="item", cascade="all, delete-orphan"
     )
 
     @property
@@ -86,12 +90,20 @@ class InventoryItem(Base):
 
 
 # ---------------------------------------------------------------------------
-# Model: EmailDraft
+# Model: EmailDraft  (SUPPLIER-SCOPED)
 # ---------------------------------------------------------------------------
 class EmailDraft(Base):
     """
-    An AI-drafted restock email generated when an item's stock falls below
-    its minimum threshold.
+    An AI-drafted restock email generated when one or more items from the
+    same supplier fall below their minimum threshold.
+
+    Key design decisions
+    --------------------
+    - Supplier-scoped: one draft per supplier covers ALL their low-stock items.
+    - The covered items are tracked in the `email_draft_items` join table.
+    - When a draft is 'sent', the covered items enter a "requested" state —
+      they are excluded from the NEXT draft for that supplier, unless their
+      stock drops again after the sent timestamp.
 
     status:
         'pending_review' — Draft ready, waiting for user to send or dismiss.
@@ -102,14 +114,47 @@ class EmailDraft(Base):
     __tablename__ = "email_drafts"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    item_id: int = Column(Integer, ForeignKey("inventory_items.id"), nullable=False)
+
+    # Supplier identity — no FK, denormalised for easy querying
+    supplier_email: str = Column(String, nullable=False, index=True)
+    supplier_name: str = Column(String, nullable=False, default="")
+
     draft_text: str = Column(Text, nullable=False)
     subject: str = Column(String, nullable=False, default="Restock Request")
-    status: str = Column(String, nullable=False, default="pending_review")  # pending_review | sent | dismissed
+    status: str = Column(String, nullable=False, default="pending_review")
+    # pending_review | sent | dismissed
+
     created_at: datetime = Column(DateTime, default=datetime.utcnow)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    item: "InventoryItem" = relationship("InventoryItem", back_populates="drafts")
+    # Items covered by this draft
+    covered_items: list["EmailDraftItem"] = relationship(
+        "EmailDraftItem", back_populates="draft", cascade="all, delete-orphan"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model: EmailDraftItem  (join table)
+# ---------------------------------------------------------------------------
+class EmailDraftItem(Base):
+    """
+    Records which inventory item is covered by which email draft.
+
+    This is the source of truth for the "requested" state:
+      - If the newest 'sent' draft for a supplier contains item_id X,
+        then item X is considered "requested" (in flight to the supplier).
+      - It is re-included in a new draft if its stock was updated AFTER
+        that sent draft's updated_at timestamp.
+    """
+
+    __tablename__ = "email_draft_items"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    draft_id: int = Column(Integer, ForeignKey("email_drafts.id"), nullable=False, index=True)
+    item_id: int = Column(Integer, ForeignKey("inventory_items.id"), nullable=False, index=True)
+
+    draft: "EmailDraft" = relationship("EmailDraft", back_populates="covered_items")
+    item: "InventoryItem" = relationship("InventoryItem", back_populates="draft_coverages")
 
 
 # ---------------------------------------------------------------------------

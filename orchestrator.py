@@ -159,7 +159,7 @@ async def _run_agent_turn(
 # ---------------------------------------------------------------------------
 # Step 1: Run the Auditor Agent
 # ---------------------------------------------------------------------------
-async def _run_auditor(session_service: InMemorySessionService, user_id: str, target_item_name: str | None = None) -> str:
+async def _run_auditor(session_service: InMemorySessionService, user_id: str, target_item_names: list[str] | None = None) -> str:
     """
     Runs the Auditor Agent to retrieve inventory and produce a ShortageReport.
 
@@ -168,9 +168,9 @@ async def _run_auditor(session_service: InMemorySessionService, user_id: str, ta
     and cleanly terminated afterwards — preventing zombie processes.
 
     Args:
-        session_service: Shared session service instance.
-        user_id:         Consistent user ID for this pipeline run.
-        target_item_name: If provided, asks the Auditor to focus on this item.
+        session_service:    Shared session service instance.
+        user_id:            Consistent user ID for this pipeline run.
+        target_item_names:  If provided, asks the Auditor to focus on these items.
 
     Returns:
         The ShortageReport as a plain-text string.
@@ -194,8 +194,13 @@ async def _run_auditor(session_service: InMemorySessionService, user_id: str, ta
         session_service=session_service,
     )
 
-    if target_item_name:
-        prompt = f"Please audit the current inventory and produce the shortage report. IMPORTANT: We are specifically targeting restocking '{target_item_name}'. Make sure this item is highlighted in the report if it is low."
+    if target_item_names:
+        items_str = ", ".join(f"'{n}'" for n in target_item_names)
+        prompt = (
+            f"Please audit the current inventory and produce the shortage report. "
+            f"IMPORTANT: We are specifically targeting restocking the following items: {items_str}. "
+            f"Make sure ALL of these items are highlighted in the report if they are low."
+        )
     else:
         prompt = "Please audit the current inventory and produce the shortage report."
 
@@ -225,6 +230,7 @@ async def _run_procurement(
     session_service: InMemorySessionService,
     user_id: str,
     shortage_report: str,
+    vendor_details: dict,
     critique: str | None,
     attempt: int,
 ) -> str:
@@ -239,6 +245,7 @@ async def _run_procurement(
         session_service: Shared session service instance.
         user_id:         Consistent user ID for this pipeline run.
         shortage_report: Output from the AuditorAgent.
+        vendor_details:  Dict with supplier contact info for this pipeline run.
         critique:        Evaluator critique from the previous attempt (or None).
         attempt:         Current attempt number (1-indexed), used for logging.
 
@@ -270,6 +277,7 @@ async def _run_procurement(
 
     user_message = build_procurement_message(
         shortage_report=shortage_report,
+        vendor_details=vendor_details,
         critique=critique,
     )
 
@@ -354,24 +362,28 @@ async def _run_evaluator(
 # ---------------------------------------------------------------------------
 # Save the final email to disk
 # ---------------------------------------------------------------------------
-def _save_output(email_draft: str, verdict: str, attempts: int) -> Path:
+def _save_output(email_draft: str, verdict: str, attempts: int, supplier_email: str = "") -> Path:
     """
-    Saves the final email draft to output/final_email.txt with a run header.
+    Saves the final email draft to output/final_email_<supplier>.txt with a run header.
 
     Args:
-        email_draft: The accepted email text.
-        verdict:     Final verdict ("PASS" or best-effort "FAIL").
-        attempts:    Number of procurement attempts made.
+        email_draft:    The accepted email text.
+        verdict:        Final verdict ("PASS" or best-effort "FAIL").
+        attempts:       Number of procurement attempts made.
+        supplier_email: Supplier email used for filename suffix.
 
     Returns:
         The Path where the file was saved.
     """
     OUTPUT_DIR.mkdir(exist_ok=True)
-    output_path = OUTPUT_DIR / "final_email.txt"
+    # Use supplier email prefix in filename to avoid overwriting between suppliers
+    safe_suffix = supplier_email.replace("@", "_at_").replace(".", "_") if supplier_email else "unknown"
+    output_path = OUTPUT_DIR / f"final_email_{safe_suffix}.txt"
 
     header = (
         f"# multi-agent-pantry — Final Restock Email\n"
         f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"# Supplier: {supplier_email}\n"
         f"# Evaluator verdict: {verdict} (after {attempts} attempt(s))\n"
         f"# {'=' * 60}\n\n"
     )
@@ -383,7 +395,11 @@ def _save_output(email_draft: str, verdict: str, attempts: int) -> Path:
 # ---------------------------------------------------------------------------
 # Main orchestration entry point
 # ---------------------------------------------------------------------------
-async def orchestrate(target_item_name: str | None = None) -> str:
+async def orchestrate(
+    target_item_names: list[str] | None = None,
+    vendor_details: dict | None = None,
+    target_item_name: str | None = None,  # legacy single-item compat
+) -> str:
     """
     Runs the full multi-agent pipeline and returns the final email draft.
 
@@ -396,8 +412,10 @@ async def orchestrate(target_item_name: str | None = None) -> str:
       4. If max attempts exhausted: log warning, save and return best draft
 
     Args:
-        target_item_name: Optional. If provided, the pipeline is instructed to
-                          focus specifically on restocking this item.
+        target_item_names: List of item names to focus on for this run.
+        vendor_details:    Supplier contact info dict for the Procurement Agent.
+                           Falls back to a generic placeholder if not provided.
+        target_item_name:  Legacy single-item compat (converted to list internally).
 
     Returns:
         The final email draft text (PASS quality or best-effort after 3 tries).
@@ -407,8 +425,18 @@ async def orchestrate(target_item_name: str | None = None) -> str:
                       indicating a data or MCP connection problem.
     """
     log.info("═══ multi-agent-pantry pipeline starting ═══")
-    if target_item_name:
-        log.info("Targeting specific item: %s", target_item_name)
+
+    # Handle legacy single-item calls
+    if target_item_name and not target_item_names:
+        target_item_names = [target_item_name]
+
+    if target_item_names:
+        log.info("Targeting items: %s", target_item_names)
+
+    # Fall back to a generic vendor dict if none supplied
+    if vendor_details is None:
+        from data.vendors import VENDOR
+        vendor_details = dict(VENDOR)
 
     # A single session service is shared across all agent runs in this pipeline.
     # InMemorySessionService is in-process and requires no external dependencies.
@@ -419,7 +447,7 @@ async def orchestrate(target_item_name: str | None = None) -> str:
     user_id = f"system-run-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     # ── Step 1: Audit ────────────────────────────────────────────────────────
-    shortage_report = await _run_auditor(session_service, user_id, target_item_name)
+    shortage_report = await _run_auditor(session_service, user_id, target_item_names)
 
     if not shortage_report:
         raise RuntimeError(
@@ -439,6 +467,7 @@ async def orchestrate(target_item_name: str | None = None) -> str:
             session_service=session_service,
             user_id=user_id,
             shortage_report=shortage_report,
+            vendor_details=vendor_details,
             critique=critique,
             attempt=attempt,
         )
@@ -474,7 +503,8 @@ async def orchestrate(target_item_name: str | None = None) -> str:
 
     # ── Save output ──────────────────────────────────────────────────────────
     final_verdict = last_result.verdict if last_result else "UNKNOWN"
-    output_path = _save_output(email_draft, final_verdict, attempt)
+    supplier_email = vendor_details.get("email", "")
+    output_path = _save_output(email_draft, final_verdict, attempt, supplier_email)
 
     log.info("═══ Pipeline complete — output saved to %s ═══", output_path)
     return email_draft
