@@ -5,11 +5,13 @@
 *Kaggle × Google · 5-Day AI Agents Intensive · **Agents for Business** Track*
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python)](https://python.org)
-[![Google ADK](https://img.shields.io/badge/Google_ADK-2.3.0-4285F4?logo=google)](https://google.github.io/adk-docs/)
+[![Google ADK](https://img.shields.io/badge/Google_ADK-latest-4285F4?logo=google)](https://google.github.io/adk-docs/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev)
 [![MCP](https://img.shields.io/badge/MCP-Model_Context_Protocol-orange)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-> Three specialized AI agents that autonomously audit restaurant inventory, draft supplier restock emails grouped by supplier, and self-critique until the output meets a strict quality standard — all without a single line of manual procurement work.
+> Three specialized AI agents that autonomously audit restaurant inventory, draft supplier restock emails grouped by supplier, and self-critique until the output meets a strict quality standard — all surfaced through a live web dashboard with one-click email sending.
 
 
 ---
@@ -45,13 +47,14 @@ This manual process introduces compounding failure modes:
 
 ## ✅ The Solution
 
-`multi-agent-pantry` is a **fully autonomous three-agent AI pipeline** built on Google's Agent Development Kit (ADK). Given a restaurant's inventory data, it:
+`multi-agent-pantry` is a **fully autonomous three-agent AI pipeline** built on Google's Agent Development Kit (ADK), backed by a FastAPI REST API, a SQLite database, and a React dashboard. Given a restaurant's inventory, it:
 
-1. **Audits** all stock levels against minimum thresholds using a live MCP tool call — no spreadsheets, no manual counting.
+1. **Audits** all stock levels against minimum thresholds using a live MCP tool call — data is stored in and queried from a SQLite database.
 2. **Groups** all low-stock items from the same supplier into a **single combined email** — one email per supplier, not one per item.
 3. **Tracks "requested" state** — items covered by a sent email are excluded from future drafts until stock drops again, preventing duplicate orders.
 4. **Drafts** a professional, complete restock email to each supplier with exact quantities for every item in that supplier's group.
 5. **Self-critiques** the draft against three strict quality criteria and automatically **retries** with targeted feedback until the email passes — or after 3 attempts outputs the best available version with a warning.
+6. **Surfaces everything in a web UI** — managers can review, edit, and send the drafted emails to suppliers with a single click, directly from the dashboard.
 
 **Business value delivered:**
 | Metric | Manual Process | multi-agent-pantry |
@@ -60,9 +63,10 @@ This manual process introduces compounding failure modes:
 | Stockout risk | High (human error) | Eliminated for tracked SKUs |
 | Email quality | Inconsistent | Enforced by Evaluator agent |
 | Duplicate order risk | High | Eliminated via "requested" state |
-| Audit trail | None | Full log + saved output |
+| Audit trail | None | Full DB log + draft history |
+| Email sending | Manual, copy-paste | One-click Gmail SMTP |
 
-One command. Zero manual input. Production-quality output.
+One stock update. Zero manual procurement. Production-quality output.
 
 ---
 
@@ -70,23 +74,30 @@ One command. Zero manual input. Production-quality output.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     FastAPI Backend (api/main.py)                   │
-│       REST API · auto-trigger on low stock · SQLite persistence     │
+│              React + Vite Frontend  (localhost:5173)                 │
+│   Inventory table · Draft review · Edit · Send · Add item modal      │
 └──────────────────────────────┬──────────────────────────────────────┘
-                               │  Low-stock event → group by supplier
+                               │  REST (fetch)
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│               Supplier Grouping & "Requested" State Logic           │
-│  • Collect ALL low-stock items for this supplier                    │
-│  • Exclude items already covered by a sent draft (in-flight)        │
-│  • Re-include items that went low AGAIN after the order was sent    │
-│  • Replace stale pending_review draft with fresh combined draft     │
+│                  FastAPI Backend  (api/main.py)                      │
+│     CRUD endpoints · Supplier grouping · "Requested" state logic     │
+│     Auto-triggers ADK pipeline on low-stock PUT · Gmail SMTP send    │
 └──────────────────────────────┬──────────────────────────────────────┘
+                               │  SQLAlchemy ORM
+                               ▼
+                    ┌──────────────────────┐
+                    │   SQLite Database     │
+                    │  (data/pantry.db)     │
+                    │  inventory_items      │
+                    │  email_drafts         │
+                    │  email_draft_items    │
+                    └──────────┬───────────┘
                                │
                                ▼
                     ┌──────────────────────┐
-                    │     orchestrator.py   │
-                    │  (async retry loop)   │
+                    │    orchestrator.py    │
+                    │   (async retry loop)  │
                     └──┬───────────────┬───┘
                        │               │
            ┌───────────▼──┐     ┌──────▼────────────────────────────┐
@@ -96,27 +107,22 @@ One command. Zero manual input. Production-quality output.
            │  McpToolset  │     │  │  ProcurementAgent (LlmAgent) │  │
            └──────┬───────┘     │  │  (vendor details from DB)    │  │
                   │ stdio MCP   │  └───────────────┬──────────────┘  │
-           ┌──────▼───────┐     │                   │ EmailDraft      │
+           ┌──────▼───────┐     │                  │ EmailDraft       │
            │  MCP Server  │     │  ┌───────────────▼──────────────┐  │
            │  (FastMCP)   │     │  │  EvaluatorAgent  (LlmAgent)  │  │
            │  + Pydantic  │     │  │  PASS → save & print         │  │
-           └──────┬───────┘     │  │  FAIL → critique → retry     │  │
-                  │             │  └──────────────────────────────┘  │
-           ┌──────▼───────┐     └────────────────────────────────────┘
-           │   SQLite DB  │
-           │  inventory   │
-           │  email_drafts│
-           │  draft_items │
-           └──────────────┘
+           └──────────────┘     │  │  FAIL → critique → retry     │  │
+                                │  └──────────────────────────────┘  │
+                                └────────────────────────────────────┘
 ```
 
 ### Agent Breakdown
 
 #### 🔍 Auditor Agent
-Calls the `check_inventory` MCP tool, receives the Pydantic-validated inventory JSON, and identifies all items where `current_stock ≤ minimum_threshold`. Computes `quantity_to_order = reorder_quantity − current_stock` for each deficit item and produces a structured **ShortageReport**. When triggered from the API, the report is scoped to a specific set of items for the target supplier.
+Calls the `check_inventory` MCP tool, receives the Pydantic-validated inventory JSON from the SQLite database, and identifies all items where `current_stock ≤ minimum_threshold`. Computes `quantity_to_order = reorder_quantity − current_stock` for each deficit item and produces a structured **ShortageReport**. When triggered from the API, the report is scoped to a specific set of items for the target supplier.
 
 #### 📧 Procurement Agent
-Receives the ShortageReport and supplier contact details (from the DB, not a static file), then drafts a professional restock request email covering **all items in that supplier group**. On retry attempts, it receives the Evaluator's specific critique prepended to its context and rewrites the email addressing every raised issue.
+Receives the ShortageReport and supplier contact details (queried from the DB, not a static file), then drafts a professional restock request email covering **all items in that supplier group**. On retry attempts, it receives the Evaluator's specific critique prepended to its context and rewrites the email addressing every raised issue.
 
 #### ✅ Evaluator Agent
 Scores the email draft against three hard criteria: **(1)** every shortage item is mentioned, **(2)** each item has an exact numeric quantity + unit, **(3)** a concrete delivery date or urgency statement is present. Returns `VERDICT: PASS` or `VERDICT: FAIL` with a targeted critique identifying every gap.
@@ -139,6 +145,18 @@ updated_at
 ```
 
 **Key design: one `EmailDraft` per supplier**, not per item. The `email_draft_items` join table records which items are "requested" (in-flight), enabling precise exclusion logic on the next procurement cycle.
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/inventory` | List all inventory items |
+| `POST` | `/api/inventory` | Add a new item (with supplier details) |
+| `PUT` | `/api/inventory/{id}` | Update stock count → auto-triggers ADK pipeline if stock < threshold |
+| `GET` | `/api/drafts` | Fetch all `pending_review` email drafts |
+| `PUT` | `/api/drafts/{id}` | Edit a draft's text or subject |
+| `POST` | `/api/drafts/{id}/send` | Send via Gmail SMTP → marks draft as `sent` |
+| `DELETE` | `/api/drafts/{id}` | Dismiss a draft without sending |
 
 ---
 
@@ -168,18 +186,21 @@ AuditorAgent ──(stdio JSON-RPC)──▶ inventory_server.py (FastMCP)
                                          │
                                     Pydantic validation
                                          │
+                                    queries SQLite DB
+                                         │
                                     returns inventory JSON
 ```
 
-This decoupling means swapping the mock data for a live Toast/Square POS API requires **zero agent code changes** — only `inventory_server.py` changes.
+This decoupling means swapping the SQLite store for a live Toast/Square POS API requires **zero agent code changes** — only `inventory_server.py` changes.
 
 ### 3. Security Features ✅
 
-- `GOOGLE_API_KEY` loaded exclusively via `python-dotenv` from `.env`
-- Key validated at startup with `sys.exit(1)` if missing — clear error, no silent failures
+- `GOOGLE_API_KEY` and `GMAIL_APP_PASSWORD` loaded exclusively via `python-dotenv` from `.env`
+- Keys validated at startup with `sys.exit(1)` if missing — clear error, no silent failures
 - `.env` in `.gitignore`; `.env.example` committed with blank values only
 - MCP server validates every outgoing record with **Pydantic** (`InventoryItem` model with field constraints and cross-field validators)
 - Evaluator `parse_evaluation_result()` defaults to `FAIL` on malformed LLM output — safe fallback
+- Gmail credentials never logged or exposed to the frontend
 
 ### 4. Deployability ✅
 
@@ -199,6 +220,8 @@ The project started with a simple idea: replace the daily procurement email rout
 
 **Supplier grouping required a rethink of the data model.** The original design created one `EmailDraft` per inventory item, leading to duplicated emails for suppliers with multiple low-stock products. Restructuring the draft to be *supplier-scoped* — with a join table tracking which items each draft covers — made the "requested" state logic clean and composable: exclude items already in a sent draft, unless they went low again after the send timestamp.
 
+**Adding the backend and frontend turned the pipeline into a product.** A FastAPI layer handles all the supplier-grouping and "requested" state logic before even touching the agents, and the React dashboard lets restaurant managers interact with the system without touching the terminal. The Gmail SMTP integration closes the loop — from stock drop to supplier email, zero copy-paste required.
+
 The biggest lesson: **multi-agent architecture is as much about data contracts and failure modes as it is about prompts.**
 
 ---
@@ -208,12 +231,13 @@ The biggest lesson: **multi-agent architecture is as much about data contracts a
 ### Prerequisites
 
 - Python 3.11+
+- Node.js 18+ (for the frontend)
 - A Google AI Studio API key ([get one free](https://aistudio.google.com/app/apikey))
-- Docker (optional, for containerised run)
+- Docker (optional, for containerised CLI run)
 
-### Option A — Web App (Recommended)
+### Option A — Full Web App (Recommended)
 
-The full experience includes a web UI with live inventory management and email draft review.
+The complete experience: live inventory management dashboard + AI-powered draft generation + one-click email sending.
 
 ```bash
 # 1. Clone the repository
@@ -227,43 +251,52 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 # 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Configure your API key (and optional Gmail credentials for actual sending)
+# 4. Configure environment variables
 cp .env.example .env
 # Open .env and set:
 #   GOOGLE_API_KEY=your_key_here
-#   GMAIL_SENDER=you@gmail.com          (optional)
-#   GMAIL_APP_PASSWORD=xxxx xxxx xxxx   (optional)
+#   GMAIL_SENDER=you@gmail.com          (optional — for one-click sending)
+#   GMAIL_APP_PASSWORD=xxxx xxxx xxxx   (optional — Gmail App Password)
 
-# 5. Start the FastAPI backend
+# 5. Start the FastAPI backend (Terminal 1)
 uvicorn api.main:app --reload
+# → Runs on http://localhost:8000
+# → Seeds the SQLite database on first run
 
-# 6. In a second terminal, start the frontend
+# 6. Start the React frontend (Terminal 2)
 cd frontend
 npm install
 npm run dev
+# → Runs on http://localhost:5173
 ```
 
-Open `http://localhost:5173` — the dashboard shows live inventory, triggers the pipeline on low-stock updates, and lets you review/edit/send the grouped supplier emails.
+Open **`http://localhost:5173`** — the dashboard shows live inventory, automatically triggers the AI pipeline when you update a stock value below its threshold, and lets you review, edit, and send the grouped supplier emails.
 
-### Option B — CLI Pipeline
+> **Gmail App Password setup:** Google Account → Security → 2-Step Verification → App Passwords → Create one named "Pantry App". Paste the 16-character token into `GMAIL_APP_PASSWORD` in your `.env`. This is completely free — no paid service needed.
+
+### Option B — CLI Pipeline (No UI)
 
 ```bash
-# Run the full agent pipeline directly (no web UI)
+# Run the full agent pipeline directly against the mock inventory data
 python main.py
 ```
+
+The pipeline logs each step and saves the final email to `output/final_email_<supplier>.txt`.
 
 ### Option C — Makefile Shortcuts
 
 ```bash
-make run          # Run the CLI pipeline locally (uses .venv)
+make setup        # Create .venv and install all dependencies
+make run          # Run the CLI pipeline locally
 make test         # Run the test suite
 make clean        # Remove output/ and __pycache__
 ```
 
-### Option D — Docker
+### Option D — Docker (CLI pipeline only)
 
 ```bash
-# 1. Configure your API key in .env (same as above)
+# 1. Configure your API key in .env first
+cp .env.example .env  # then edit .env
 
 # 2. Build and run with docker-compose
 make docker-up
@@ -272,9 +305,9 @@ make docker-up
 docker compose up --build
 ```
 
-### Expected Output
+> **Note:** The Docker setup runs the CLI pipeline (`main.py`). The web app (FastAPI + React) is intended for local development.
 
-The pipeline logs each step and prints the final email:
+### Expected Output (CLI)
 
 ```
 11:30:01 [INFO] orchestrator — ═══ multi-agent-pantry pipeline starting ═══
@@ -287,8 +320,6 @@ The pipeline logs each step and prints the final email:
 11:30:11 [INFO] orchestrator — EvaluationResult: verdict=PASS | critique=(none)
 11:30:11 [INFO] orchestrator — ✅ Email PASSED evaluation on attempt 1
 ```
-
-The final email is saved to `output/final_email_<supplier>.txt`.
 
 ---
 
@@ -347,21 +378,25 @@ multi-agent-pantry/
 │
 ├── README.md                    ← You are here
 ├── spec.md                      ← Full architecture specification
-├── requirements.txt             ← google-adk, mcp, pydantic, python-dotenv
-├── Makefile                     ← make run | make docker-up | make test
+├── requirements.txt             ← google-adk, fastapi, uvicorn, sqlalchemy,
+│                                   mcp, pydantic, python-dotenv, aiofiles
+├── Makefile                     ← make setup | make run | make docker-up | make test
 ├── Dockerfile                   ← Multi-stage, non-root, no baked secrets
-├── docker-compose.yml           ← Single-service deployment
-├── .env.example                 ← Safe template (blank values)
+├── docker-compose.yml           ← Single-service deployment (CLI pipeline)
+├── .env.example                 ← Safe template (blank values only)
 ├── .gitignore
 │
 ├── data/
-│   ├── database.py              ← SQLAlchemy models: InventoryItem, EmailDraft,
-│   │                               EmailDraftItem (supplier-grouped drafts)
-│   ├── inventory.py             ← Legacy mock inventory helpers
-│   └── vendors.py               ← Fallback supplier contact details (CLI mode)
+│   ├── database.py              ← SQLAlchemy models & helpers:
+│   │                               InventoryItem, EmailDraft, EmailDraftItem
+│   │                               init_db(), seed_database(), get_db()
+│   ├── inventory.py             ← Mock inventory data (used by CLI main.py)
+│   ├── vendors.py               ← Fallback supplier contact details (CLI mode)
+│   └── pantry.db                ← SQLite database (git-ignored)
 │
 ├── mcp_server/
 │   └── inventory_server.py      ← FastMCP server + Pydantic validation
+│                                   Reads from SQLite DB (or falls back to mock)
 │
 ├── agents/
 │   ├── auditor.py               ← AuditorAgent (LlmAgent + McpToolset)
@@ -370,23 +405,31 @@ multi-agent-pantry/
 │
 ├── api/
 │   ├── main.py                  ← FastAPI backend
-│   │                               • Supplier grouping & "requested" state logic
-│   │                               • Auto-trigger pipeline on low stock
-│   │                               • Draft CRUD endpoints
-│   └── email_sender.py          ← Gmail SMTP sender
+│   │                               • GET/POST /api/inventory
+│   │                               • PUT /api/inventory/{id} → auto-triggers pipeline
+│   │                               • GET/PUT/DELETE /api/drafts
+│   │                               • POST /api/drafts/{id}/send
+│   └── email_sender.py          ← Gmail SMTP sender (App Password auth)
 │
-├── frontend/
+├── frontend/                    ← React 19 + Vite app
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.js
 │   └── src/
-│       ├── components/
-│       │   ├── DraftPanel.jsx   ← Draft review UI (grouped items per supplier)
-│       │   ├── InventoryTable.jsx
-│       │   └── AddItemModal.jsx
-│       └── api/client.js        ← Fetch wrappers for all API endpoints
+│       ├── App.jsx              ← Root component, layout, state management
+│       ├── index.css            ← Global styles & design tokens
+│       ├── api/
+│       │   └── client.js        ← Typed fetch wrappers for all API endpoints
+│       └── components/
+│           ├── InventoryTable.jsx  ← Live inventory table with inline stock editing
+│           ├── DraftPanel.jsx      ← Draft review UI (grouped items per supplier)
+│           ├── AddItemModal.jsx    ← Add new inventory item form
+│           └── Toast.jsx           ← Notification toasts
 │
-├── orchestrator.py              ← Async pipeline + retry loop (multi-item aware)
-├── main.py                      ← CLI entry point
+├── orchestrator.py              ← Async ADK pipeline + retry loop (multi-item aware)
+├── main.py                      ← CLI entry point (uses mock data, no web server)
 │
-└── output/                      ← Git-ignored; stores run artefacts
+└── output/                      ← Git-ignored; stores CLI run artefacts
     └── final_email_<supplier>.txt
 ```
 
@@ -396,12 +439,13 @@ multi-agent-pantry/
 
 | Limitation | Future Enhancement |
 |---|---|
-| Mock inventory data | Connect to real POS APIs (Toast, Square, Lightspeed) via MCP server swap |
-| Supplier contact info | Store full contact details per supplier in DB (contact name, account number) |
-| CLI only (non-web mode) | Slack / email integration to deliver the final email automatically |
-| No scheduling | Cron-triggered runs or webhook integration with inventory management systems |
-| In-memory ADK sessions | Persistent session storage for audit history and compliance logging |
-| Free-tier rate limits | Implement exponential backoff and model fallback (Flash → Pro) |
+| SQLite database | Swap to PostgreSQL for multi-user / production deployments |
+| Single-restaurant setup | Multi-tenant support with per-restaurant data isolation |
+| No scheduling | Cron-triggered audits or webhook integration with POS systems |
+| In-memory ADK sessions | Persistent session storage for full audit history & compliance logging |
+| Free-tier rate limits | Exponential backoff and model fallback (Flash Lite → Flash → Pro) |
+| CLI Docker image only | Dockerise the full web stack (FastAPI + React) with `nginx` reverse proxy |
+| No auth on the web UI | Add JWT / OAuth2 authentication for production use |
 
 ---
 
