@@ -81,39 +81,40 @@ One stock update. Zero manual procurement. Production-quality output.
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                  FastAPI Backend  (api/main.py)                      │
-│     CRUD endpoints · Supplier grouping · "Requested" state logic     │
-│     Auto-triggers ADK pipeline on low-stock PUT · Gmail SMTP send    │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │  SQLAlchemy ORM
-                               ▼
-                    ┌──────────────────────┐
-                    │   SQLite Database     │
-                    │  (data/pantry.db)     │
-                    │  inventory_items      │
-                    │  email_drafts         │
-                    │  email_draft_items    │
-                    └──────────┬───────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │    orchestrator.py    │
-                    │   (async retry loop)  │
-                    └──┬───────────────┬───┘
-                       │               │
-           ┌───────────▼──┐     ┌──────▼────────────────────────────┐
-           │ AuditorAgent │     │         Retry Loop (max 3)         │
-           │ (LlmAgent)   │     │                                    │
-           │              │     │  ┌──────────────────────────────┐  │
-           │  McpToolset  │     │  │  ProcurementAgent (LlmAgent) │  │
-           └──────┬───────┘     │  │  (vendor details from DB)    │  │
-                  │ stdio MCP   │  └───────────────┬──────────────┘  │
-           ┌──────▼───────┐     │                  │ EmailDraft       │
-           │  MCP Server  │     │  ┌───────────────▼──────────────┐  │
-           │  (FastMCP)   │     │  │  EvaluatorAgent  (LlmAgent)  │  │
-           │  + Pydantic  │     │  │  PASS → save & print         │  │
-           └──────────────┘     │  │  FAIL → critique → retry     │  │
-                                │  └──────────────────────────────┘  │
-                                └────────────────────────────────────┘
+│  REST API · Gmail SMTP send                                          │
+│  On low-stock PUT:                                                   │
+│    • Collect ALL low-stock items for this supplier                   │
+│    • Exclude items already covered by a sent draft (in-flight)       │
+│    • Re-include items that went low AGAIN after the order was sent   │
+│    • Replace stale pending_review draft with fresh combined draft    │
+└─┬────────────────────────────┬──────────────────────────────────────┘
+  │ (Saves draft to DB)        │ (Triggers pipeline)
+  │                            ▼
+  │              ┌─────────────────────────────┐
+  │              │       orchestrator.py        │
+  │              │      (async retry loop)      │
+  │              └──┬──────────────────────┬───┘
+  │                 │                      │
+  │     ┌───────────▼──┐     ┌─────────────▼──────────────────────────┐
+  │     │ AuditorAgent │     │           Retry Loop (max 3)            │
+  │     │ (LlmAgent)   │     │                                         │
+  │     │  McpToolset  │     │  ┌──────────────────────────────────┐  │
+  │     └──────┬───────┘     │  │  ProcurementAgent (LlmAgent)     │  │
+  │            │ stdio MCP   │  │  (vendor details from DB)        │  │
+  │     ┌──────▼───────┐     │  └──────────────────┬───────────────┘  │
+  │     │  MCP Server  │     │                     │ EmailDraft        │
+  │     │  (FastMCP)   │     │  ┌──────────────────▼───────────────┐  │
+  │     │  + Pydantic  │     │  │  EvaluatorAgent  (LlmAgent)      │  │
+  │     └──────┬───────┘     │  │  PASS → save & print             │  │
+  │            │             │  │  FAIL → critique → retry         │  │
+  │            │             │  └──────────────────────────────────┘  │
+  │            │             └─────────────────────────────────────────┘
+┌─▼────────────▼──────────────────────┐
+│           SQLite Database            │  ← FastAPI saves drafts (SQLAlchemy ORM)
+│         (data/pantry.db)            │    MCP Server reads inventory (Pydantic)
+│  inventory_items · email_drafts      │    Both access the same database independently
+│  email_draft_items                   │
+└──────────────────────────────────────┘
 ```
 
 ### Agent Breakdown
