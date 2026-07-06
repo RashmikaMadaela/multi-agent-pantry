@@ -14,12 +14,12 @@ const POLL_INTERVAL_MS = 15_000; // Poll for new drafts every 15 seconds
 let toastId = 0;
 
 export default function App() {
-  const [inventory, setInventory] = useState([]);
-  const [drafts, setDrafts] = useState([]);
-  const [toasts, setToasts] = useState([]);
+  const [inventory, setInventory]     = useState([]);
+  const [drafts, setDrafts]           = useState([]);
+  const [toasts, setToasts]           = useState([]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showDraftPanel, setShowDraftPanel] = useState(false);
-  const [loadingInv, setLoadingInv] = useState(true);
+  const [loadingInv, setLoadingInv]   = useState(true);
   const prevDraftCountRef = useRef(0);
 
   const addToast = useCallback((message, type = 'info') => {
@@ -67,9 +67,9 @@ export default function App() {
   }, [fetchDrafts]);
 
   // ── Derived stats ────────────────────────────────────────────────────────
-  const totalItems = inventory.length;
-  const lowItems = inventory.filter((i) => i.is_low_stock).length;
-  const okItems = totalItems - lowItems;
+  const totalItems  = inventory.length;
+  const lowItems    = inventory.filter((i) => i.is_low_stock).length;
+  const okItems     = totalItems - lowItems;
   const pendingDrafts = drafts.length;
 
   // ── Handlers ─────────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ export default function App() {
       <header className="topbar">
         <div className="topbar-brand">
           <span className="brand-icon">🍽️</span>
-          La Bella Cucina - Pantry Manager
+          La Bella Cucina — Pantry Manager
         </div>
 
         <div className="topbar-actions">
